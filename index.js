@@ -1,17 +1,21 @@
-// bazzar-udid — приём UDID для регистрации сертификата, размещён на российском
-// хостинге (Timeweb), чтобы установка профиля работала из РФ без VPN.
-// Зависимостей нет — только встроенный http. Порт берётся из окружения (Timeweb задаёт PORT).
+// bazzar-udid — российский фронт (Timeweb) для флоу установки, чтобы всё работало из РФ без VPN.
+// 1) Приём UDID: /generate (профиль) + /receive (UDID -> 301 на /auth) + /health.
+// 2) Прокси подписи: /api/* -> немецкий сигнер (signer origin), т.к. Cloudflare из РФ режется,
+//    а origin сигнера имеет самоподписанный серт (напрямую iOS не примет). Телефон видит только
+//    российский хост с валидным HTTPS; прокси сам ходит на сигнер (сервер->сервер работает).
 const http = require('http');
+const https = require('https');
 
 const MARKET_URL = (process.env.MARKET_URL || 'https://bazzar-serts.shop').replace(/\/+$/, '');
 const PORT = process.env.PORT || 3000;
+// Origin сигнера: прямой IP немецкого VPS + его vhost (самоподписанный серт игнорируем на стороне сервера).
+const SIGNER_ORIGIN_IP = process.env.SIGNER_ORIGIN_IP || '103.227.84.8';
+const SIGNER_HOST = process.env.SIGNER_HOST || 'signer.bazzar-serts.shop';
 
 function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Apple OTA Profile Service enrollment profile (unsigned).
-// URL — это наш же /receive (на том же российском хосте).
 function buildProfile(receiveUrl) {
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -48,6 +52,29 @@ function buildProfile(receiveUrl) {
   ].join('\n');
 }
 
+// Прокси запроса на origin сигнера (немецкий VPS, самоподписанный серт → rejectUnauthorized:false).
+function proxyToSigner(req, res, u) {
+  const headers = { ...req.headers, host: SIGNER_HOST };
+  delete headers['accept-encoding']; // пусть отдаёт как есть, без сюрпризов со сжатием
+  const options = {
+    host: SIGNER_ORIGIN_IP,
+    port: 443,
+    method: req.method,
+    path: u.pathname + (u.search || ''),
+    servername: SIGNER_HOST,
+    rejectUnauthorized: false,
+    headers,
+    timeout: 60000,
+  };
+  const up = https.request(options, (upRes) => {
+    res.writeHead(upRes.statusCode || 502, upRes.headers);
+    upRes.pipe(res);
+  });
+  up.on('timeout', () => { up.destroy(new Error('upstream timeout')); });
+  up.on('error', (e) => { try { res.writeHead(502, { 'Content-Type': 'text/plain' }); res.end('signer proxy error: ' + e.message); } catch {} });
+  req.pipe(up);
+}
+
 const server = http.createServer((req, res) => {
   let u;
   try {
@@ -58,13 +85,16 @@ const server = http.createServer((req, res) => {
   const path = u.pathname;
   const host = req.headers.host || 'udid.bazzar-serts.shop';
 
-  // Health check (Timeweb дергает /health).
+  // Прокси подписи на сигнер (/api/sign, /api/jobs, /api/manifest, /api/download, ...).
+  if (path.startsWith('/api/')) {
+    return proxyToSigner(req, res, u);
+  }
+
   if (path === '/health' || path === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
     return res.end('ok');
   }
 
-  // GET /generate?code=... → отдаём .mobileconfig. Callback (URL) ведёт на наш же /receive.
   if (path === '/generate' && (req.method === 'GET' || req.method === 'HEAD')) {
     const code = u.searchParams.get('code') || '';
     let receiveUrl = `https://${host}/receive`;
@@ -78,13 +108,12 @@ const server = http.createServer((req, res) => {
     return res.end(req.method === 'HEAD' ? undefined : xml);
   }
 
-  // POST /receive → iPhone присылает подписанный PKCS#7 с атрибутами; вытаскиваем UDID.
   if (path === '/receive' && req.method === 'POST') {
     const chunks = [];
     let size = 0;
     req.on('data', (c) => {
       size += c.length;
-      if (size > 1_000_000) { req.destroy(); return; } // защита от мусора
+      if (size > 1_000_000) { req.destroy(); return; }
       chunks.push(c);
     });
     req.on('end', () => {
@@ -100,7 +129,6 @@ const server = http.createServer((req, res) => {
       }
       let redirect = `${MARKET_URL}/auth?udid=${encodeURIComponent(udid)}&model=${encodeURIComponent(product)}`;
       if (code) redirect += `&code=${encodeURIComponent(code)}`;
-      // Safari сам пройдёт по 301 и вернёт пользователя на сайт (российский апекс).
       res.writeHead(301, { Location: redirect });
       res.end();
     });
@@ -112,4 +140,4 @@ const server = http.createServer((req, res) => {
   res.end('not found');
 });
 
-server.listen(PORT, () => console.log(`[bazzar-udid] listening on ${PORT}, market=${MARKET_URL}`));
+server.listen(PORT, () => console.log(`[bazzar-udid] listening on ${PORT}, market=${MARKET_URL}, signer=${SIGNER_ORIGIN_IP}`));
