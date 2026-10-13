@@ -14,6 +14,8 @@ Cloudflare из РФ системным установщиком iOS не про
 ```
 npm start   # node index.js, слушает process.env.PORT (Timeweb задаёт сам)
 ```
-Env: `MARKET_URL` (по умолчанию `https://bazzar-serts.shop`), `PORT`.
+Env: `MARKET_URL` (по умолчанию `https://bazzar-serts.shop`), `PORT`, `WORKERS` (рабочих копий, по умолчанию 2 — по одной на ядро), `SIGNER_ORIGIN_IP`, `SIGNER_HOST`.
+
+Прокси `/api/*` → сервер подписи: соединения переиспользуются (keep-alive); предварительный запрос браузера (OPTIONS) отвечается сразу; если сервер подписи недоступен — `503`/`504` JSON с CORS (сайт сам повторит), а не «Load failed».
 
 Зависимостей нет — только встроенный `http`.

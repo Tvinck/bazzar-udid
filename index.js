@@ -5,6 +5,7 @@
 //    российский хост с валидным HTTPS; прокси сам ходит на сигнер (сервер->сервер работает).
 const http = require('http');
 const https = require('https');
+const cluster = require('cluster');
 
 const MARKET_URL = (process.env.MARKET_URL || 'https://bazzar-serts.shop').replace(/\/+$/, '');
 const PORT = process.env.PORT || 3000;
@@ -52,10 +53,28 @@ function buildProfile(receiveUrl) {
   ].join('\n');
 }
 
+// Соединения с сигнером держим открытыми и переиспользуем: без этого каждый запрос заново делал TLS-рукопожатие
+// с Германией (лишние ~0,2–0,5 с и нагрузка на процессор).
+const signerAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 15000, maxSockets: 256, maxFreeSockets: 32 });
+
+// Разрешение браузеру (CORS). Сигнер отдаёт его сам, но если прокси отвечает ошибкой без него, Safari видит
+// не «сервер занят», а «Load failed» — и сайт не может сам повторить запрос (клиенту — «Нет связи»).
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
+  'Access-Control-Max-Age': '86400',
+};
+
 // Прокси запроса на origin сигнера (немецкий VPS, самоподписанный серт → rejectUnauthorized:false).
 function proxyToSigner(req, res, u) {
+  // Предварительный запрос браузера (OPTIONS) отвечаем сами — без поездки в Германию; кэшируется на сутки.
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { ...CORS, 'Access-Control-Allow-Headers': req.headers['access-control-request-headers'] || 'Content-Type' });
+    return res.end();
+  }
   const headers = { ...req.headers, host: SIGNER_HOST };
   delete headers['accept-encoding']; // пусть отдаёт как есть, без сюрпризов со сжатием
+  delete headers.connection; // соединением с сигнером управляет agent (keep-alive)
   const options = {
     host: SIGNER_ORIGIN_IP,
     port: 443,
@@ -63,15 +82,30 @@ function proxyToSigner(req, res, u) {
     path: u.pathname + (u.search || ''),
     servername: SIGNER_HOST,
     rejectUnauthorized: false,
+    agent: signerAgent,
     headers,
     timeout: 60000,
+  };
+  const fail = (status, code, message) => {
+    if (res.headersSent) { res.destroy(); return; } // файл уже начали отдавать — просто обрываем
+    try {
+      res.writeHead(status, { ...CORS, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ success: false, code, error: message }));
+    } catch {}
   };
   const up = https.request(options, (upRes) => {
     res.writeHead(upRes.statusCode || 502, upRes.headers);
     upRes.pipe(res);
   });
-  up.on('timeout', () => { up.destroy(new Error('upstream timeout')); });
-  up.on('error', (e) => { try { res.writeHead(502, { 'Content-Type': 'text/plain' }); res.end('signer proxy error: ' + e.message); } catch {} });
+  up.on('timeout', () => { up.destroy(Object.assign(new Error('upstream timeout'), { code: 'UPSTREAM_TIMEOUT' })); });
+  up.on('error', (e) => {
+    console.error(`[bazzar-udid] signer ${req.method} ${u.pathname}: ${e.code || ''} ${e.message}`);
+    // 503/504 — сайт сам подождёт и повторит; клиент увидит «сервер занят», а не «нет связи»
+    if (e.code === 'UPSTREAM_TIMEOUT') fail(504, 'SIGNER_TIMEOUT', 'Сервер подписи не ответил вовремя. Повторяем…');
+    else fail(503, 'SIGNER_UNREACHABLE', 'Сервер подписи временно недоступен. Повторяем…');
+  });
+  // клиент ушёл (закрыл страницу / оборвал загрузку) — не качаем файл из Германии впустую
+  res.on('close', () => { if (!res.writableFinished) up.destroy(); });
   req.pipe(up);
 }
 
@@ -140,4 +174,17 @@ const server = http.createServer((req, res) => {
   res.end('not found');
 });
 
-server.listen(PORT, () => console.log(`[bazzar-udid] listening on ${PORT}, market=${MARKET_URL}, signer=${SIGNER_ORIGIN_IP}`));
+// Несколько рабочих копий — по одной на ядро (одна программа Node использует одно ядро).
+// Число — env WORKERS, по умолчанию 2 (под конфигурацию 2 ядра; os.cpus() в контейнере показывает ядра хоста).
+// Копия упала — главный процесс поднимает новую.
+const WORKERS = Math.max(1, Number(process.env.WORKERS) || 2);
+if (cluster.isPrimary && WORKERS > 1) {
+  for (let i = 0; i < WORKERS; i++) cluster.fork();
+  cluster.on('exit', (w, code, sig) => {
+    console.error(`[bazzar-udid] worker ${w.process.pid} exited (${sig || code}) — restarting`);
+    setTimeout(() => cluster.fork(), 1000);
+  });
+  console.log(`[bazzar-udid] primary ${process.pid}: ${WORKERS} workers on ${PORT}`);
+} else {
+  server.listen(PORT, () => console.log(`[bazzar-udid] ${cluster.isWorker ? 'worker ' + process.pid : 'single'} listening on ${PORT}, market=${MARKET_URL}, signer=${SIGNER_ORIGIN_IP}`));
+}
