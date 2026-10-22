@@ -117,7 +117,13 @@ const server = http.createServer((req, res) => {
     res.writeHead(400); return res.end('bad request');
   }
   const path = u.pathname;
-  const host = req.headers.host || 'udid.bazzar-serts.shop';
+  const host = (req.headers.host || 'udid.bazzar-serts.shop').toLowerCase();
+
+  // Короткий бренд-домен bzzr.su (для коротких ссылок в приложениях) → наш сайт, любой адрес.
+  if (host === 'bzzr.su' || host === 'www.bzzr.su') {
+    res.writeHead(301, { Location: MARKET_URL + u.pathname + u.search, 'Cache-Control': 'no-store' });
+    return res.end();
+  }
 
   // Прокси подписи на сигнер (/api/sign, /api/jobs, /api/manifest, /api/download, ...).
   if (path.startsWith('/api/')) {
