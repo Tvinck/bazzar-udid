@@ -4,6 +4,7 @@
 //    а origin сигнера имеет самоподписанный серт (напрямую iOS не примет). Телефон видит только
 //    российский хост с валидным HTTPS; прокси сам ходит на сигнер (сервер->сервер работает).
 // 3) Прокси проверки заказа: /shop/<площадка>/<verify|link> -> connect (см. proxyToConnect).
+// 4) Прокси базы: /sb/<rest|storage>/v1/... -> Supabase (см. proxyToSupabase).
 const http = require('http');
 const https = require('https');
 const cluster = require('cluster');
@@ -115,7 +116,7 @@ function proxyToSigner(req, res, u) {
 //    Пускаем только эти адреса, остальное API сюда не открываем. Сайт при сбое прокси сам идёт на api.* напрямую.
 const CONNECT_ORIGIN = (process.env.CONNECT_ORIGIN || 'https://api.bazzar-serts.shop').replace(/\/+$/, '');
 const SHOP_ROUTE = /^\/shop\/(ggsel|digiseller)\/(verify|link)$/;
-const connectAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 15000, maxSockets: 64, maxFreeSockets: 8 });
+const connectAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 15000, maxSockets: 64, maxFreeSockets: 8, timeout: 4000 });
 // Что передаём в connect: Origin/Referer — по ним connect пускает привязку с нашего сайта (lib/shop-auth).
 const PASS_HEADERS = ['accept', 'content-type', 'content-length', 'origin', 'referer', 'user-agent'];
 
@@ -159,6 +160,68 @@ function proxyToConnect(req, res, u, shop, action) {
   req.pipe(up);
 }
 
+// 4) «Российская дверь» к базе (Supabase): сайт читает каталог, цены, кабинет, чат поддержки. Supabase за Cloudflare,
+//    у части операторов РФ режется (кабинет и чат грузились долго или никак). Отсюда — сервер→сервер.
+//    Только наш проект и только данные (/rest/v1) и файлы (/storage/v1); вход и админка Supabase сюда не открыты.
+//    Своих ключей у прокси нет: идёт публичный ключ сайта, права те же (RLS). Сайт при сбое прокси идёт напрямую.
+const SUPABASE_ORIGIN = (process.env.SUPABASE_ORIGIN || 'https://fhwrdhebhgywhvoeqpxj.supabase.co').replace(/\/+$/, '');
+const SB_ROUTE = /^\/sb\/(rest|storage)\/v1\//;
+const SB_METHODS = ['GET', 'HEAD', 'POST'];
+const SB_PASS_HEADERS = ['accept', 'accept-encoding', 'accept-profile', 'apikey', 'authorization', 'cache-control', 'content-length',
+  'content-profile', 'content-type', 'if-none-match', 'prefer', 'range', 'range-unit', 'x-client-info', 'x-upsert', 'user-agent'];
+// timeout — простаивающее соединение закрываем сами через 4 с, раньше Cloudflare (иначе он рвёт его на следующем запросе).
+const sbAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 15000, maxSockets: 128, maxFreeSockets: 16, timeout: 4000 });
+
+function proxyToSupabase(req, res, u) {
+  const cors = { ...CORS, 'Access-Control-Allow-Origin': req.headers.origin || '*' };
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { ...cors, 'Access-Control-Allow-Headers': req.headers['access-control-request-headers'] || 'apikey, authorization, content-type' });
+    return res.end();
+  }
+  const fail = (status, code, message) => {
+    if (res.headersSent) { res.destroy(); return; }
+    try {
+      res.writeHead(status, { ...cors, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ code, message }));
+    } catch {}
+  };
+  if (!SB_METHODS.includes(req.method)) return fail(405, 'METHOD', 'Метод не поддерживается');
+  const headers = {};
+  for (const h of SB_PASS_HEADERS) if (req.headers[h]) headers[h] = req.headers[h];
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (ip) headers['x-forwarded-for'] = ip;
+  const target = SUPABASE_ORIGIN + u.pathname.slice('/sb'.length) + (u.search || '');
+  // Чтение без тела: если Cloudflare уже закрыл переиспользуемое соединение (ECONNRESET / socket hang up) — один повтор
+  // по свежему соединению, клиент этого не заметит. Запись не повторяем (возможен дубль).
+  const canRetry = req.method === 'GET' || req.method === 'HEAD';
+  let up = null;
+  const send = (retry) => {
+    up = https.request(target, { method: req.method, headers, agent: sbAgent, timeout: 30000 }, (upRes) => {
+      // Ответ отдаём как есть (в т.ч. сжатый), CORS — только наш; Content-Range и пр. браузер должен видеть (счётчики).
+      const out = {};
+      for (const [k, v] of Object.entries(upRes.headers)) {
+        if (!k.startsWith('access-control-') && k !== 'set-cookie' && k !== 'connection') out[k] = v;
+      }
+      Object.assign(out, cors, {
+        'Access-Control-Expose-Headers': upRes.headers['access-control-expose-headers'] || 'Content-Range, Content-Location, Range-Unit, Preference-Applied',
+      });
+      res.writeHead(upRes.statusCode || 502, out);
+      upRes.pipe(res);
+    });
+    up.on('timeout', () => { up.destroy(Object.assign(new Error('upstream timeout'), { code: 'UPSTREAM_TIMEOUT' })); });
+    up.on('error', (e) => {
+      if (res.destroyed) return; // браузер сам отменил запрос (ушёл со страницы) — мы прервали его у базы, это не сбой
+      if (canRetry && !retry && !res.headersSent && e.code === 'ECONNRESET') return send(true);
+      console.error(`[bazzar-udid] supabase ${req.method} ${u.pathname}: ${e.code || ''} ${e.message}${retry ? ' (после повтора)' : ''}`);
+      if (e.code === 'UPSTREAM_TIMEOUT') fail(504, 'SUPABASE_TIMEOUT', 'База не ответила вовремя.');
+      else fail(502, 'SUPABASE_UNREACHABLE', 'База временно недоступна.');
+    });
+    if (canRetry) up.end(); else req.pipe(up);
+  };
+  res.on('close', () => { if (!res.writableFinished && up) up.destroy(); });
+  send(false);
+}
+
 const server = http.createServer((req, res) => {
   let u;
   try {
@@ -183,6 +246,9 @@ const server = http.createServer((req, res) => {
   // Проверка заказа / привязка: /shop/<ggsel|digiseller>/<verify|link> → connect /api/shop/...
   const shopRoute = path.match(SHOP_ROUTE);
   if (shopRoute) return proxyToConnect(req, res, u, shopRoute[1], shopRoute[2]);
+
+  // База (Supabase): /sb/rest/v1/... и /sb/storage/v1/... → наш проект Supabase.
+  if (SB_ROUTE.test(path)) return proxyToSupabase(req, res, u);
 
   if (path === '/health' || path === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
