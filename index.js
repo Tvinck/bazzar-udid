@@ -3,6 +3,7 @@
 // 2) Прокси подписи: /api/* -> немецкий сигнер (signer origin), т.к. Cloudflare из РФ режется,
 //    а origin сигнера имеет самоподписанный серт (напрямую iOS не примет). Телефон видит только
 //    российский хост с валидным HTTPS; прокси сам ходит на сигнер (сервер->сервер работает).
+// 3) Прокси проверки заказа: /shop/<площадка>/<verify|link> -> connect (см. proxyToConnect).
 const http = require('http');
 const https = require('https');
 const cluster = require('cluster');
@@ -109,6 +110,55 @@ function proxyToSigner(req, res, u) {
   req.pipe(up);
 }
 
+// 3) Прокси проверки заказа и привязки к устройству (сайт /success, /order-check, /auth): у части операторов РФ
+//    Cloudflare перед api.* тормозит — клиенты ждали проверку минутами. Отсюда (сервер→сервер) ходит за 1–2 с.
+//    Пускаем только эти адреса, остальное API сюда не открываем. Сайт при сбое прокси сам идёт на api.* напрямую.
+const CONNECT_ORIGIN = (process.env.CONNECT_ORIGIN || 'https://api.bazzar-serts.shop').replace(/\/+$/, '');
+const SHOP_ROUTE = /^\/shop\/(ggsel|digiseller)\/(verify|link)$/;
+const connectAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 15000, maxSockets: 64, maxFreeSockets: 8 });
+// Что передаём в connect: Origin/Referer — по ним connect пускает привязку с нашего сайта (lib/shop-auth).
+const PASS_HEADERS = ['accept', 'content-type', 'content-length', 'origin', 'referer', 'user-agent'];
+
+function proxyToConnect(req, res, u, shop, action) {
+  const cors = { ...CORS, 'Access-Control-Allow-Origin': req.headers.origin || '*' };
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { ...cors, 'Access-Control-Allow-Headers': req.headers['access-control-request-headers'] || 'Content-Type' });
+    return res.end();
+  }
+  const fail = (status, code, message) => {
+    if (res.headersSent) { res.destroy(); return; }
+    try {
+      res.writeHead(status, { ...cors, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ success: false, code, error: message }));
+    } catch {}
+  };
+  if (req.method !== (action === 'link' ? 'POST' : 'GET')) return fail(405, 'METHOD', 'Метод не поддерживается');
+  const headers = {};
+  for (const h of PASS_HEADERS) if (req.headers[h]) headers[h] = req.headers[h];
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (ip) headers['x-forwarded-for'] = ip;
+  const target = `${CONNECT_ORIGIN}/api/shop/${shop}/${action}${u.search || ''}`;
+  const up = https.request(target, { method: req.method, headers, agent: connectAgent, timeout: 25000 }, (upRes) => {
+    // CORS — только наш: два заголовка Access-Control-Allow-Origin (connect + прокси) браузер отвергает.
+    const out = {};
+    for (const [k, v] of Object.entries(upRes.headers)) {
+      if (!k.startsWith('access-control-') && k !== 'set-cookie' && k !== 'connection') out[k] = v;
+    }
+    Object.assign(out, cors);
+    res.writeHead(upRes.statusCode || 502, out);
+    upRes.pipe(res);
+  });
+  up.on('timeout', () => { up.destroy(Object.assign(new Error('upstream timeout'), { code: 'UPSTREAM_TIMEOUT' })); });
+  up.on('error', (e) => {
+    console.error(`[bazzar-udid] connect ${req.method} ${u.pathname}: ${e.code || ''} ${e.message}`);
+    // 502/504 — сайт сразу повторит запрос напрямую на api.*
+    if (e.code === 'UPSTREAM_TIMEOUT') fail(504, 'CONNECT_TIMEOUT', 'Сервер заказов не ответил вовремя.');
+    else fail(502, 'CONNECT_UNREACHABLE', 'Сервер заказов временно недоступен.');
+  });
+  res.on('close', () => { if (!res.writableFinished) up.destroy(); });
+  req.pipe(up);
+}
+
 const server = http.createServer((req, res) => {
   let u;
   try {
@@ -129,6 +179,10 @@ const server = http.createServer((req, res) => {
   if (path.startsWith('/api/')) {
     return proxyToSigner(req, res, u);
   }
+
+  // Проверка заказа / привязка: /shop/<ggsel|digiseller>/<verify|link> → connect /api/shop/...
+  const shopRoute = path.match(SHOP_ROUTE);
+  if (shopRoute) return proxyToConnect(req, res, u, shopRoute[1], shopRoute[2]);
 
   if (path === '/health' || path === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
