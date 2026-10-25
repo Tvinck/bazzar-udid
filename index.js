@@ -24,15 +24,19 @@ function esc(s) {
 
 // Профиль запроса UDID (Profile Service). Для лайта — свои имя/идентификатор/UUID, чтобы это был
 // ОТДЕЛЬНЫЙ профиль и он не пересекался с основным. Механизм (DeviceAttributes) тот же.
+// Основной профиль не менять: его название («Bazzar Certs») — в инструкциях сайта и статьях помощи.
+// Лайт клиенту не говорит о сертификатах — ни в названии, ни в организации, ни в идентификаторе.
 const MAIN_PROFILE = {
+  organization: 'Bazzar Certs',
   displayName: 'Bazzar Certs',
   identifier: 'com.bazzar.certs.enroll',
   uuid: '9F025114-16CA-4AE1-B0E3-F5E5170B1E6E',
   description: 'Разрешите доступ к идентификатору устройства для регистрации сертификата Bazzar Certs.',
 };
 const LIGHT_PROFILE = {
+  organization: 'BAZZAR',
   displayName: 'Bazzar — приложения',
-  identifier: 'com.bazzar.certs.enroll.app',
+  identifier: 'com.bazzar.apps.enroll',
   uuid: 'B6F0C2A4-7D11-4E92-9C3A-2F5A1E0B7C48',
   description: 'Разрешите доступ к идентификатору устройства, чтобы подготовить приложения BAZZAR для вашего iPhone.',
 };
@@ -55,7 +59,7 @@ function buildProfile(receiveUrl, p = MAIN_PROFILE) {
     '    </array>',
     '  </dict>',
     '  <key>PayloadOrganization</key>',
-    '  <string>Bazzar Certs</string>',
+    `  <string>${esc(p.organization)}</string>`,
     '  <key>PayloadDisplayName</key>',
     `  <string>${esc(p.displayName)}</string>`,
     '  <key>PayloadVersion</key>',
