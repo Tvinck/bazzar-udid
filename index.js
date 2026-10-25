@@ -3,13 +3,16 @@
 // 2) Прокси подписи: /api/* -> немецкий сигнер (signer origin), т.к. Cloudflare из РФ режется,
 //    а origin сигнера имеет самоподписанный серт (напрямую iOS не примет). Телефон видит только
 //    российский хост с валидным HTTPS; прокси сам ходит на сигнер (сервер->сервер работает).
-// 3) Прокси проверки заказа: /shop/<площадка>/<verify|link> -> connect (см. proxyToConnect).
+// 3) Прокси проверки заказа: /shop/<площадка>/<verify|link> и лайт /shop/light/<действие> -> connect (см. proxyToConnect).
 // 4) Прокси базы: /sb/<rest|storage>/v1/... -> Supabase (см. proxyToSupabase).
 const http = require('http');
 const https = require('https');
 const cluster = require('cluster');
 
 const MARKET_URL = (process.env.MARKET_URL || 'https://bazzar-serts.shop').replace(/\/+$/, '');
+// Лайт-маркет (app.bazzar-serts.shop): отдельный поддомен со своим кабинетом.
+// Профиль ?target=app после снятия UDID ведёт туда; основной флоу не меняется.
+const LIGHT_MARKET_URL = (process.env.LIGHT_MARKET_URL || 'https://app.bazzar-serts.shop').replace(/\/+$/, '');
 const PORT = process.env.PORT || 3000;
 // Origin сигнера: прямой IP немецкого VPS + его vhost (самоподписанный серт игнорируем на стороне сервера).
 const SIGNER_ORIGIN_IP = process.env.SIGNER_ORIGIN_IP || '103.227.84.8';
@@ -19,7 +22,22 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function buildProfile(receiveUrl) {
+// Профиль запроса UDID (Profile Service). Для лайта — свои имя/идентификатор/UUID, чтобы это был
+// ОТДЕЛЬНЫЙ профиль и он не пересекался с основным. Механизм (DeviceAttributes) тот же.
+const MAIN_PROFILE = {
+  displayName: 'Bazzar Certs',
+  identifier: 'com.bazzar.certs.enroll',
+  uuid: '9F025114-16CA-4AE1-B0E3-F5E5170B1E6E',
+  description: 'Разрешите доступ к идентификатору устройства для регистрации сертификата Bazzar Certs.',
+};
+const LIGHT_PROFILE = {
+  displayName: 'Bazzar — приложения',
+  identifier: 'com.bazzar.certs.enroll.app',
+  uuid: 'B6F0C2A4-7D11-4E92-9C3A-2F5A1E0B7C48',
+  description: 'Разрешите доступ к идентификатору устройства, чтобы подготовить приложения BAZZAR для вашего iPhone.',
+};
+
+function buildProfile(receiveUrl, p = MAIN_PROFILE) {
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -39,15 +57,15 @@ function buildProfile(receiveUrl) {
     '  <key>PayloadOrganization</key>',
     '  <string>Bazzar Certs</string>',
     '  <key>PayloadDisplayName</key>',
-    '  <string>Bazzar Certs</string>',
+    `  <string>${esc(p.displayName)}</string>`,
     '  <key>PayloadVersion</key>',
     '  <integer>1</integer>',
     '  <key>PayloadUUID</key>',
-    '  <string>9F025114-16CA-4AE1-B0E3-F5E5170B1E6E</string>',
+    `  <string>${esc(p.uuid)}</string>`,
     '  <key>PayloadIdentifier</key>',
-    '  <string>com.bazzar.certs.enroll</string>',
+    `  <string>${esc(p.identifier)}</string>`,
     '  <key>PayloadDescription</key>',
-    '  <string>Разрешите доступ к идентификатору устройства для регистрации сертификата Bazzar Certs.</string>',
+    `  <string>${esc(p.description)}</string>`,
     '  <key>PayloadType</key>',
     '  <string>Profile Service</string>',
     '</dict>',
@@ -116,6 +134,9 @@ function proxyToSigner(req, res, u) {
 //    Пускаем только эти адреса, остальное API сюда не открываем. Сайт при сбое прокси сам идёт на api.* напрямую.
 const CONNECT_ORIGIN = (process.env.CONNECT_ORIGIN || 'https://api.bazzar-serts.shop').replace(/\/+$/, '');
 const SHOP_ROUTE = /^\/shop\/(ggsel|digiseller)\/(verify|link)$/;
+// Лайт-маркет (app.bazzar-serts.shop): кабинет, цены, оплата — те же причины. Метод — как у адреса в connect.
+const LIGHT_ROUTE = /^\/shop\/(light)\/(config|status|order-status|redeem|buy|buy-pack|renew-warranty)$/;
+const LIGHT_GET = new Set(['config', 'status', 'order-status']);
 const connectAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 15000, maxSockets: 64, maxFreeSockets: 8, timeout: 4000 });
 // Что передаём в connect: Origin/Referer — по ним connect пускает привязку с нашего сайта (lib/shop-auth).
 const PASS_HEADERS = ['accept', 'content-type', 'content-length', 'origin', 'referer', 'user-agent'];
@@ -133,7 +154,8 @@ function proxyToConnect(req, res, u, shop, action) {
       res.end(JSON.stringify({ success: false, code, error: message }));
     } catch {}
   };
-  if (req.method !== (action === 'link' ? 'POST' : 'GET')) return fail(405, 'METHOD', 'Метод не поддерживается');
+  const post = shop === 'light' ? !LIGHT_GET.has(action) : action === 'link';
+  if (req.method !== (post ? 'POST' : 'GET')) return fail(405, 'METHOD', 'Метод не поддерживается');
   const headers = {};
   for (const h of PASS_HEADERS) if (req.headers[h]) headers[h] = req.headers[h];
   const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
@@ -244,7 +266,7 @@ const server = http.createServer((req, res) => {
   }
 
   // Проверка заказа / привязка: /shop/<ggsel|digiseller>/<verify|link> → connect /api/shop/...
-  const shopRoute = path.match(SHOP_ROUTE);
+  const shopRoute = path.match(SHOP_ROUTE) || path.match(LIGHT_ROUTE);
   if (shopRoute) return proxyToConnect(req, res, u, shopRoute[1], shopRoute[2]);
 
   // База (Supabase): /sb/rest/v1/... и /sb/storage/v1/... → наш проект Supabase.
@@ -257,12 +279,18 @@ const server = http.createServer((req, res) => {
 
   if (path === '/generate' && (req.method === 'GET' || req.method === 'HEAD')) {
     const code = u.searchParams.get('code') || '';
+    // target=app → лайт-профиль + возврат в лайт-кабинет. Любое другое значение = основной флоу.
+    const isApp = u.searchParams.get('target') === 'app';
+    // code/target переносим в URL профиля — /receive прочитает их из СВОЕГО запроса.
+    const qs = [];
+    if (code) qs.push(`code=${encodeURIComponent(code)}`);
+    if (isApp) qs.push('target=app');
     let receiveUrl = `https://${host}/receive`;
-    if (code) receiveUrl += `?code=${encodeURIComponent(code)}`;
-    const xml = buildProfile(receiveUrl);
+    if (qs.length) receiveUrl += `?${qs.join('&')}`;
+    const xml = buildProfile(receiveUrl, isApp ? LIGHT_PROFILE : MAIN_PROFILE);
     res.writeHead(200, {
       'Content-Type': 'application/x-apple-aspen-config; charset=utf-8',
-      'Content-Disposition': 'attachment; filename="bazzar-enroll.mobileconfig"',
+      'Content-Disposition': `attachment; filename="${isApp ? 'bazzar-app.mobileconfig' : 'bazzar-enroll.mobileconfig'}"`,
       'Cache-Control': 'no-store',
     });
     return res.end(req.method === 'HEAD' ? undefined : xml);
@@ -283,11 +311,13 @@ const server = http.createServer((req, res) => {
       const pm = raw.match(/<key>PRODUCT<\/key>\s*<string>([^<]+)<\/string>/);
       const product = pm ? pm[1] : '';
       const code = u.searchParams.get('code') || '';
+      const isApp = u.searchParams.get('target') === 'app';
       if (!udid) {
         res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
         return res.end('Failed to extract UDID');
       }
-      let redirect = `${MARKET_URL}/auth?udid=${encodeURIComponent(udid)}&model=${encodeURIComponent(product)}`;
+      // Лайт → app.bazzar-serts.shop/light/ (кабинет лайта); основной → /auth.
+      let redirect = `${isApp ? `${LIGHT_MARKET_URL}/light/` : `${MARKET_URL}/auth`}?udid=${encodeURIComponent(udid)}&model=${encodeURIComponent(product)}`;
       if (code) redirect += `&code=${encodeURIComponent(code)}`;
       res.writeHead(301, { Location: redirect });
       res.end();
