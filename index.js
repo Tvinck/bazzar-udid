@@ -136,7 +136,9 @@ function proxyToSigner(req, res, u) {
 // 3) Прокси проверки заказа и привязки к устройству (сайт /success, /order-check, /auth): у части операторов РФ
 //    Cloudflare перед api.* тормозит — клиенты ждали проверку минутами. Отсюда (сервер→сервер) ходит за 1–2 с.
 //    Пускаем только эти адреса, остальное API сюда не открываем. Сайт при сбое прокси сам идёт на api.* напрямую.
-const CONNECT_ORIGIN = (process.env.CONNECT_ORIGIN || 'https://api.bazzar-serts.shop').replace(/\/+$/, '');
+// Прямой домен Vercel, мимо Cloudflare: сети РФ (и Timeweb) рвут через 15 с адреса Cloudflare 188.114.96–97.x,
+// в которые резолвится api.bazzar-serts.shop (31.10.2026). Тот же прод connect, его же использует автобот.
+const CONNECT_ORIGIN = (process.env.CONNECT_ORIGIN || 'https://connect-4va6.vercel.app').replace(/\/+$/, '');
 const SHOP_ROUTE = /^\/shop\/(ggsel|digiseller)\/(verify|link)$/;
 // Лайт-маркет (app.bazzar-serts.shop): кабинет, цены, оплата — те же причины. Метод — как у адреса в connect.
 const LIGHT_ROUTE = /^\/shop\/(light)\/(config|status|order-status|redeem|buy|buy-pack|renew-warranty)$/;
@@ -346,5 +348,5 @@ if (cluster.isPrimary && WORKERS > 1) {
   });
   console.log(`[bazzar-udid] primary ${process.pid}: ${WORKERS} workers on ${PORT}`);
 } else {
-  server.listen(PORT, () => console.log(`[bazzar-udid] ${cluster.isWorker ? 'worker ' + process.pid : 'single'} listening on ${PORT}, market=${MARKET_URL}, signer=${SIGNER_ORIGIN_IP}`));
+  server.listen(PORT, () => console.log(`[bazzar-udid] ${cluster.isWorker ? 'worker ' + process.pid : 'single'} listening on ${PORT}, market=${MARKET_URL}, signer=${SIGNER_ORIGIN_IP}, connect=${CONNECT_ORIGIN}`));
 }
