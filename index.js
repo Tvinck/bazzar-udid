@@ -136,9 +136,15 @@ function proxyToSigner(req, res, u) {
 // 3) Прокси проверки заказа и привязки к устройству (сайт /success, /order-check, /auth): у части операторов РФ
 //    Cloudflare перед api.* тормозит — клиенты ждали проверку минутами. Отсюда (сервер→сервер) ходит за 1–2 с.
 //    Пускаем только эти адреса, остальное API сюда не открываем. Сайт при сбое прокси сам идёт на api.* напрямую.
-// Прямой домен Vercel, мимо Cloudflare: сети РФ (и Timeweb) рвут через 15 с адреса Cloudflare 188.114.96–97.x,
-// в которые резолвится api.bazzar-serts.shop (31.10.2026). Тот же прод connect, его же использует автобот.
-const CONNECT_ORIGIN = (process.env.CONNECT_ORIGIN || 'https://connect-4va6.vercel.app').replace(/\/+$/, '');
+const CONNECT_ORIGIN = (process.env.CONNECT_ORIGIN || 'https://api.bazzar-serts.shop').replace(/\/+$/, '');
+// Мимо Cloudflare: сети РФ (и Timeweb) рвут через 15 с адреса Cloudflare 188.114.96–97.x, в которые резолвится
+// api.*, а домен *.vercel.app режут по имени (31.10.2026). Поэтому соединяемся с IP Vercel напрямую, но с именем
+// api.bazzar-serts.shop (SNI + Host) — Vercel отдаёт на него свой валидный сертификат и тот же прод connect.
+// CONNECT_IP='' — обычный DNS (через Cloudflare).
+const CONNECT_IP = process.env.CONNECT_IP ?? '76.76.21.21';
+const connectLookup = CONNECT_IP
+  ? (hostname, opts, cb) => (opts && opts.all ? cb(null, [{ address: CONNECT_IP, family: 4 }]) : cb(null, CONNECT_IP, 4))
+  : undefined;
 const SHOP_ROUTE = /^\/shop\/(ggsel|digiseller)\/(verify|link)$/;
 // Лайт-маркет (app.bazzar-serts.shop): кабинет, цены, оплата — те же причины. Метод — как у адреса в connect.
 const LIGHT_ROUTE = /^\/shop\/(light)\/(config|status|order-status|redeem|buy|buy-pack|renew-warranty)$/;
@@ -167,7 +173,7 @@ function proxyToConnect(req, res, u, shop, action) {
   const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
   if (ip) headers['x-forwarded-for'] = ip;
   const target = `${CONNECT_ORIGIN}/api/shop/${shop}/${action}${u.search || ''}`;
-  const up = https.request(target, { method: req.method, headers, agent: connectAgent, timeout: 25000 }, (upRes) => {
+  const up = https.request(target, { method: req.method, headers, agent: connectAgent, lookup: connectLookup, timeout: 25000 }, (upRes) => {
     // CORS — только наш: два заголовка Access-Control-Allow-Origin (connect + прокси) браузер отвергает.
     const out = {};
     for (const [k, v] of Object.entries(upRes.headers)) {
@@ -348,5 +354,5 @@ if (cluster.isPrimary && WORKERS > 1) {
   });
   console.log(`[bazzar-udid] primary ${process.pid}: ${WORKERS} workers on ${PORT}`);
 } else {
-  server.listen(PORT, () => console.log(`[bazzar-udid] ${cluster.isWorker ? 'worker ' + process.pid : 'single'} listening on ${PORT}, market=${MARKET_URL}, signer=${SIGNER_ORIGIN_IP}, connect=${CONNECT_ORIGIN}`));
+  server.listen(PORT, () => console.log(`[bazzar-udid] ${cluster.isWorker ? 'worker ' + process.pid : 'single'} listening on ${PORT}, market=${MARKET_URL}, signer=${SIGNER_ORIGIN_IP}, connect=${CONNECT_ORIGIN}${CONNECT_IP ? ' via ' + CONNECT_IP : ''}`));
 }
