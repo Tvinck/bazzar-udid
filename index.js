@@ -154,6 +154,16 @@ const connectAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 15000, m
 const PASS_HEADERS = ['accept', 'content-type', 'content-length', 'origin', 'referer', 'user-agent'];
 
 function proxyToConnect(req, res, u, shop, action) {
+  const post = shop === 'light' ? !LIGHT_GET.has(action) : action === 'link';
+  return forwardToConnect(req, res, u, `/api/shop/${shop}/${action}`, [post ? 'POST' : 'GET']);
+}
+
+// «Лайт 2» (bazzar-serts.shop/lighttwo, 03.11.2026): /l2/b/<токен> и /l2/manifest/<ключ> → connect /api/lite2/…
+// Те же причины, что у лайта: из сетей РФ api.* (Cloudflare) режется. connect по заголовку x-lite2-proxy строит
+// ссылки установки (манифест и сам IPA) тоже через этот прокси — иначе iPhone в РФ их не скачает.
+const L2_ROUTE = /^\/l2\/(b\/[\w-]{30,64}|manifest\/[^/]{1,160})$/;
+
+function forwardToConnect(req, res, u, apiPath, methods, extraHeaders = {}) {
   const cors = { ...CORS, 'Access-Control-Allow-Origin': req.headers.origin || '*' };
   if (req.method === 'OPTIONS') {
     res.writeHead(204, { ...cors, 'Access-Control-Allow-Headers': req.headers['access-control-request-headers'] || 'Content-Type' });
@@ -166,13 +176,12 @@ function proxyToConnect(req, res, u, shop, action) {
       res.end(JSON.stringify({ success: false, code, error: message }));
     } catch {}
   };
-  const post = shop === 'light' ? !LIGHT_GET.has(action) : action === 'link';
-  if (req.method !== (post ? 'POST' : 'GET')) return fail(405, 'METHOD', 'Метод не поддерживается');
-  const headers = {};
+  if (!methods.includes(req.method)) return fail(405, 'METHOD', 'Метод не поддерживается');
+  const headers = { ...extraHeaders };
   for (const h of PASS_HEADERS) if (req.headers[h]) headers[h] = req.headers[h];
   const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
   if (ip) headers['x-forwarded-for'] = ip;
-  const target = `${CONNECT_ORIGIN}/api/shop/${shop}/${action}${u.search || ''}`;
+  const target = `${CONNECT_ORIGIN}${apiPath}${u.search || ''}`;
   const up = https.request(target, { method: req.method, headers, agent: connectAgent, lookup: connectLookup, timeout: 25000 }, (upRes) => {
     // CORS — только наш: два заголовка Access-Control-Allow-Origin (connect + прокси) браузер отвергает.
     const out = {};
@@ -280,6 +289,13 @@ const server = http.createServer((req, res) => {
   // Проверка заказа / привязка: /shop/<ggsel|digiseller>/<verify|link> → connect /api/shop/...
   const shopRoute = path.match(SHOP_ROUTE) || path.match(LIGHT_ROUTE);
   if (shopRoute) return proxyToConnect(req, res, u, shopRoute[1], shopRoute[2]);
+
+  // Лайт 2: /l2/b/<токен> (GET, POST ?action=…) и /l2/manifest/<ключ> (GET) → connect /api/lite2/…
+  const l2 = path.match(L2_ROUTE);
+  if (l2) {
+    const isB = l2[1].startsWith('b/');
+    return forwardToConnect(req, res, u, `/api/lite2/${l2[1]}`, isB ? ['GET', 'POST'] : ['GET'], { 'x-lite2-proxy': `https://${host}` });
+  }
 
   // База (Supabase): /sb/rest/v1/... и /sb/storage/v1/... → наш проект Supabase.
   if (SB_ROUTE.test(path)) return proxyToSupabase(req, res, u);
