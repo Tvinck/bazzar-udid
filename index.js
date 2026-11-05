@@ -290,6 +290,9 @@ const server = http.createServer((req, res) => {
   const shopRoute = path.match(SHOP_ROUTE) || path.match(LIGHT_ROUTE);
   if (shopRoute) return proxyToConnect(req, res, u, shopRoute[1], shopRoute[2]);
 
+  // Кнопка «Проверить сертификат» в кабинетах → connect (из сетей РФ api.* режется).
+  if (path === '/cert/self-check') return forwardToConnect(req, res, u, '/api/cert/self-check', ['POST']);
+
   // Лайт 2: /l2/b/<токен> (GET, POST ?action=…) и /l2/manifest/<ключ> (GET) → connect /api/lite2/…
   const l2 = path.match(L2_ROUTE);
   if (l2) {
