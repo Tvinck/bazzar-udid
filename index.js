@@ -147,8 +147,8 @@ const connectLookup = CONNECT_IP
   : undefined;
 const SHOP_ROUTE = /^\/shop\/(ggsel|digiseller)\/(verify|link)$/;
 // Лайт-маркет (app.bazzar-serts.shop): кабинет, цены, оплата — те же причины. Метод — как у адреса в connect.
-const LIGHT_ROUTE = /^\/shop\/(light)\/(config|status|order-status|redeem|buy|buy-pack|renew-warranty)$/;
-const LIGHT_GET = new Set(['config', 'status', 'order-status']);
+const LIGHT_ROUTE = /^\/shop\/(light)\/(config|status|order-status|redeem|buy|buy-pack|renew-warranty|lite2|showcase)$/;
+const LIGHT_GET = new Set(['config', 'status', 'order-status', 'showcase']);
 const connectAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 15000, maxSockets: 64, maxFreeSockets: 8, timeout: 4000 });
 // Что передаём в connect: Origin/Referer — по ним connect пускает привязку с нашего сайта (lib/shop-auth).
 const PASS_HEADERS = ['accept', 'content-type', 'content-length', 'origin', 'referer', 'user-agent'];
