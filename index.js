@@ -14,8 +14,10 @@ const MARKET_URL = (process.env.MARKET_URL || 'https://bazzar-serts.shop').repla
 // Профиль ?target=app после снятия UDID ведёт туда; основной флоу не меняется.
 const LIGHT_MARKET_URL = (process.env.LIGHT_MARKET_URL || 'https://app.bazzar-serts.shop').replace(/\/+$/, '');
 const PORT = process.env.PORT || 3000;
-// Origin сигнера: прямой IP немецкого VPS + его vhost (самоподписанный серт игнорируем на стороне сервера).
-const SIGNER_ORIGIN_IP = process.env.SIGNER_ORIGIN_IP || '103.227.84.8';
+// Origin сигнера: прямой IP сервера подписи + его vhost (самоподписанный серт игнорируем на стороне сервера).
+// С 18.11.2026 — Москва (Timeweb bazzar-signer-msk). На проде задано env SIGNER_ORIGIN_IP; запасное значение
+// тоже новое, чтобы при потере переменной прокси молча не вернулся на старый MHost 103.227.84.8.
+const SIGNER_ORIGIN_IP = process.env.SIGNER_ORIGIN_IP || '201.34.136.190';
 const SIGNER_HOST = process.env.SIGNER_HOST || 'signer.bazzar-serts.shop';
 
 function esc(s) {
