@@ -165,6 +165,8 @@ function proxyToConnect(req, res, u, shop, action) {
 // ссылки установки (манифест и сам IPA) тоже через этот прокси — иначе iPhone в РФ их не скачает.
 const L2_ROUTE = /^\/l2\/(b\/[\w-]{30,64}|manifest\/[^/]{1,160})$/;
 
+const MOBILE_ROUTES = { '/mobile/login/start': 'POST', '/mobile/login/verify': 'POST', '/mobile/logout': 'POST', '/mobile/certificate': 'GET' };
+
 function forwardToConnect(req, res, u, apiPath, methods, extraHeaders = {}) {
   const cors = { ...CORS, 'Access-Control-Allow-Origin': req.headers.origin || '*' };
   if (req.method === 'OPTIONS') {
@@ -298,6 +300,14 @@ const server = http.createServer((req, res) => {
   // Опт · Лайт-ссылка клиента оптовика (app.bazzar-serts.shop/light/order, 18.11.2026): проверка — GET, активация — POST.
   if (path === '/shop/wholesale-light/verify') return forwardToConnect(req, res, u, '/api/shop/wholesale-light/verify', ['GET']);
   if (path === '/shop/wholesale-light/redeem') return forwardToConnect(req, res, u, '/api/shop/wholesale-light/redeem', ['POST']);
+
+  // iOS-приложение BAZZAR (18.11.2026): вход по коду из чата заказа и статус сертификата → connect /api/mobile/…
+  // Authorization (токен сессии приложения) передаём дальше; в журнал он не пишется.
+  const mobile = MOBILE_ROUTES[path];
+  if (mobile) {
+    const auth = req.headers.authorization;
+    return forwardToConnect(req, res, u, '/api' + path, [mobile], auth ? { authorization: auth } : {});
+  }
 
   // Лайт 2: /l2/b/<токен> (GET, POST ?action=…) и /l2/manifest/<ключ> (GET) → connect /api/lite2/…
   const l2 = path.match(L2_ROUTE);
