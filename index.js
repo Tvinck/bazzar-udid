@@ -298,6 +298,14 @@ const server = http.createServer((req, res) => {
   if (path === '/cert/self-check') return forwardToConnect(req, res, u, '/api/cert/self-check', ['POST']);
 
   // Опт · Лайт-ссылка клиента оптовика (app.bazzar-serts.shop/light/order, 18.11.2026): проверка — GET, активация — POST.
+  // Переход по личной ссылке сотрудника (?ref=код) — запасной путь, когда api.* из сети клиента недоступен.
+  // Настоящий адрес клиента передаём отдельным заголовком; connect верит ему только при совпадении общего ключа
+  // PROXY_SHARED_SECRET (задаётся здесь и в connect). Без ключа переход запишется, но в оплату не пойдёт.
+  if (path === '/shop/ref/click') {
+    const clientIp = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+    return forwardToConnect(req, res, u, '/api/shop/ref/click', ['POST'], { 'x-bazzar-client-ip': clientIp, 'x-bazzar-proxy-key': process.env.PROXY_SHARED_SECRET || '' });
+  }
+
   if (path === '/shop/wholesale-light/verify') return forwardToConnect(req, res, u, '/api/shop/wholesale-light/verify', ['GET']);
   if (path === '/shop/wholesale-light/redeem') return forwardToConnect(req, res, u, '/api/shop/wholesale-light/redeem', ['POST']);
 
