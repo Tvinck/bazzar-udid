@@ -3,7 +3,7 @@
 // 2) Прокси подписи: /api/* -> немецкий сигнер (signer origin), т.к. Cloudflare из РФ режется,
 //    а origin сигнера имеет самоподписанный серт (напрямую iOS не примет). Телефон видит только
 //    российский хост с валидным HTTPS; прокси сам ходит на сигнер (сервер->сервер работает).
-// 3) Прокси проверки заказа: /shop/<площадка>/<verify|link> и лайт /shop/light/<действие> -> connect (см. proxyToConnect).
+// 3) Прокси проверки заказа: /shop/<площадка>/<verify|link>, лайт /shop/light/<действие> и Лайт-опт /shop/wholesale-light/<verify|redeem> -> connect.
 // 4) Прокси базы: /sb/<rest|storage>/v1/... -> Supabase (см. proxyToSupabase).
 const http = require('http');
 const https = require('https');
@@ -292,6 +292,10 @@ const server = http.createServer((req, res) => {
 
   // Кнопка «Проверить сертификат» в кабинетах → connect (из сетей РФ api.* режется).
   if (path === '/cert/self-check') return forwardToConnect(req, res, u, '/api/cert/self-check', ['POST']);
+
+  // Опт · Лайт-ссылка клиента оптовика (app.bazzar-serts.shop/light/order, 18.11.2026): проверка — GET, активация — POST.
+  if (path === '/shop/wholesale-light/verify') return forwardToConnect(req, res, u, '/api/shop/wholesale-light/verify', ['GET']);
+  if (path === '/shop/wholesale-light/redeem') return forwardToConnect(req, res, u, '/api/shop/wholesale-light/redeem', ['POST']);
 
   // Лайт 2: /l2/b/<токен> (GET, POST ?action=…) и /l2/manifest/<ключ> (GET) → connect /api/lite2/…
   const l2 = path.match(L2_ROUTE);
