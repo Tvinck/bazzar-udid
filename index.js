@@ -165,7 +165,7 @@ function proxyToConnect(req, res, u, shop, action) {
 // ссылки установки (манифест и сам IPA) тоже через этот прокси — иначе iPhone в РФ их не скачает.
 const L2_ROUTE = /^\/l2\/(b\/[\w-]{30,64}|manifest\/[^/]{1,160})$/;
 
-const MOBILE_ROUTES = { '/mobile/login/start': 'POST', '/mobile/login/verify': 'POST', '/mobile/logout': 'POST', '/mobile/certificate': 'GET', '/mobile/certificate/device': 'POST', '/mobile/certificate/files': 'POST' };
+const MOBILE_ROUTES = { '/mobile/login/start': 'POST', '/mobile/login/verify': 'POST', '/mobile/logout': 'POST', '/mobile/certificate': 'GET', '/mobile/certificate/device': 'POST', '/mobile/certificate/files': 'POST', '/mobile/app-report': 'POST' };
 
 function forwardToConnect(req, res, u, apiPath, methods, extraHeaders = {}) {
   const cors = { ...CORS, 'Access-Control-Allow-Origin': req.headers.origin || '*' };
