@@ -317,6 +317,13 @@ const server = http.createServer((req, res) => {
     return forwardToConnect(req, res, u, '/api' + path, [mobile], auth ? { authorization: auth } : {});
   }
 
+  // Лайт 2 · машина кодов «спрашивает сама» (26.11.2026): Mac без VPN опрашивает connect через этот прокси.
+  // Секрет агента (Authorization) передаём как есть — проверяет его connect.
+  if (path === '/l2/agent') {
+    const auth = req.headers.authorization;
+    return forwardToConnect(req, res, u, '/api/lite2/agent', ['GET', 'POST'], auth ? { authorization: auth } : {});
+  }
+
   // Лайт 2: /l2/b/<токен> (GET, POST ?action=…) и /l2/manifest/<ключ> (GET) → connect /api/lite2/…
   const l2 = path.match(L2_ROUTE);
   if (l2) {
